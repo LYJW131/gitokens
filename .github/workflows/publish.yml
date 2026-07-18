@@ -21,6 +21,7 @@ jobs:
         run: |
           [ "v$(node -p "require('./package.json').version")" = "${GITHUB_REF_NAME}" ] \
             || { echo "tag ${GITHUB_REF_NAME} != package.json version"; exit 1; }
+      # OIDC trusted publishing (configured on npmjs.com) — no token needed,
+      # but it requires npm >= 11.5.1
+      - run: npm install -g npm@latest
       - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
