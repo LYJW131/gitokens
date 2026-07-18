@@ -1,0 +1,15 @@
+{
+  "name": "gitokens",
+  "version": "0.1.0",
+  "description": "Record AI (Claude Code) token usage between commits and append it to the next commit message as git trailers.",
+  "bin": {
+    "gitokens": "bin/gitokens.js"
+  },
+  "files": [
+    "bin/gitokens.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
