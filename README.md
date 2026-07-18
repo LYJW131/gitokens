@@ -44,12 +44,13 @@ git log --format='%h %(trailers:key=AI-Tokens,valueonly)'
 ## Install
 
 ```sh
-git clone https://github.com/LYJW131/gitokens.git
-cd gitokens && npm link        # makes the `gitokens` command available globally
+npm install -g gitokens
 
 cd your-repository
 gitokens install               # one-time per repository
 ```
+
+Or from source: `git clone https://github.com/LYJW131/gitokens.git && cd gitokens && npm link`.
 
 `install` sets up `prepare-commit-msg` and `post-commit` hooks (it refuses to
 overwrite hooks it doesn't manage) and initializes the checkpoint. From then
