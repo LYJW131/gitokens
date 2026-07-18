@@ -43,6 +43,10 @@ function checkpointFile(root) {
 }
 
 function readCheckpoint(root) {
+  if (process.env.GITOKENS_SINCE) {
+    const t = Date.parse(process.env.GITOKENS_SINCE);
+    if (!Number.isNaN(t)) return t;
+  }
   try {
     const t = Date.parse(fs.readFileSync(checkpointFile(root), 'utf8').trim());
     if (!Number.isNaN(t)) return t;
@@ -107,6 +111,19 @@ function* jsonlFiles(root, sinceMs) {
   }
 }
 
+function inRepo(root, cwd) {
+  return cwd === root || (cwd && cwd.startsWith(root + path.sep));
+}
+
+function bump(perModel, model, d) {
+  const agg = perModel.get(model) || { in: 0, out: 0, cacheRead: 0, cacheWrite: 0 };
+  agg.in += d.in;
+  agg.out += d.out;
+  agg.cacheRead += d.cacheRead;
+  agg.cacheWrite += d.cacheWrite;
+  perModel.set(model, agg);
+}
+
 function collect(root, sinceMs) {
   const perModel = new Map(); // model -> {in, out, cacheRead, cacheWrite}
   const seen = new Set();
@@ -133,23 +150,113 @@ function collect(root, sinceMs) {
       if (!m.model || m.model === '<synthetic>') continue;
       const ts = Date.parse(o.timestamp);
       if (Number.isNaN(ts) || ts <= sinceMs) continue;
-      if (o.cwd && o.cwd !== root && !o.cwd.startsWith(root + path.sep)) continue;
+      if (o.cwd && !inRepo(root, o.cwd)) continue;
       const key = (m.id || '') + ':' + (o.requestId || o.uuid || '');
       if (seen.has(key)) continue; // streamed chunks repeat message ids
       seen.add(key);
 
       const u = m.usage;
-      const agg = perModel.get(m.model) || { in: 0, out: 0, cacheRead: 0, cacheWrite: 0 };
-      agg.in += u.input_tokens || 0;
-      agg.out += u.output_tokens || 0;
-      agg.cacheRead += u.cache_read_input_tokens || 0;
-      agg.cacheWrite += u.cache_creation_input_tokens || 0;
-      perModel.set(m.model, agg);
+      bump(perModel, m.model, {
+        in: u.input_tokens || 0,
+        out: u.output_tokens || 0,
+        cacheRead: u.cache_read_input_tokens || 0,
+        cacheWrite: u.cache_creation_input_tokens || 0,
+      });
       if (o.sessionId) sessions.add(o.sessionId);
       if (ts > latest) latest = ts;
     }
   }
+
+  collectCodex(root, sinceMs, perModel, sessions);
   return { perModel, sessions: sessions.size, latest };
+}
+
+// ------------------------------------------------------- Codex CLI transcripts
+
+// Codex writes rollout files to ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl.
+// `token_count` events carry cumulative totals for the session; diffing the
+// cumulative counter (instead of summing `last_token_usage`) makes the math
+// immune to repeated/duplicate events.
+function* codexFiles(sinceMs) {
+  const stack = [path.join(os.homedir(), '.codex', 'sessions')];
+  while (stack.length) {
+    const dir = stack.pop();
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) stack.push(full);
+      else if (e.name.endsWith('.jsonl')) {
+        let st;
+        try {
+          st = fs.statSync(full);
+        } catch {
+          continue;
+        }
+        if (st.mtimeMs > sinceMs) yield full;
+      }
+    }
+  }
+}
+
+function collectCodex(root, sinceMs, perModel, sessions) {
+  for (const file of codexFiles(sinceMs)) {
+    let text;
+    try {
+      text = fs.readFileSync(file, 'utf8');
+    } catch {
+      continue;
+    }
+    let cwd = null;
+    let model = 'codex';
+    let prev = null; // last seen cumulative total_token_usage
+    for (const line of text.split('\n')) {
+      if (!line) continue;
+      let o;
+      try {
+        o = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const p = o.payload;
+      if (o.type === 'session_meta') {
+        cwd = (p && p.cwd) || cwd;
+      } else if (o.type === 'turn_context') {
+        cwd = (p && p.cwd) || cwd;
+        model = (p && p.model) || model;
+      } else if (o.type === 'event_msg' && p && p.type === 'token_count') {
+        const t = p.info && p.info.total_token_usage;
+        if (!t) continue;
+        let d = {
+          in: (t.input_tokens || 0) - (t.cached_input_tokens || 0),
+          out: t.output_tokens || 0,
+          cacheRead: t.cached_input_tokens || 0,
+          cacheWrite: 0, // Codex does not report cache writes
+        };
+        if (prev) {
+          d = {
+            in: d.in - ((prev.input_tokens || 0) - (prev.cached_input_tokens || 0)),
+            out: d.out - (prev.output_tokens || 0),
+            cacheRead: d.cacheRead - (prev.cached_input_tokens || 0),
+            cacheWrite: 0,
+          };
+        }
+        prev = t;
+        // counter reset (e.g. session restart): treat this event as a fresh start
+        if (d.in < 0 || d.out < 0 || d.cacheRead < 0) continue;
+        const ts = Date.parse(o.timestamp);
+        if (Number.isNaN(ts) || ts <= sinceMs) continue;
+        if (!inRepo(root, cwd)) continue;
+        if (d.in + d.out + d.cacheRead === 0) continue;
+        bump(perModel, model, d);
+        sessions.add(file);
+      }
+    }
+  }
 }
 
 // ------------------------------------------------------------------ trailers
