@@ -10,7 +10,9 @@ machine-readable [git trailers](https://git-scm.com/docs/git-interpret-trailers)
 ```
 Add user authentication
 
-AI-Tokens: model=claude-fable-5 in=1204 out=8455 cache-read=203941 cache-write=40673
+AI-Model: claude-fable-5, gpt-5.6-sol
+AI-Tokens: in=1204, out=8455, cache-read=203941, cache-write=40673
+AI-Cost-USD: 1.23
 ```
 
 ## How it works
@@ -24,7 +26,11 @@ AI-Tokens: model=claude-fable-5 in=1204 out=8455 cache-read=203941 cache-write=4
   window since the last commit (a checkpoint file in `.git/`, updated by a
   `post-commit` hook), deduplicates streamed chunks by message + request id,
   and sums tokens per model.
-- The `prepare-commit-msg` hook appends one `AI-Tokens:` trailer per model via
+- Costs are computed from [LiteLLM's public pricing table](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json)
+  (the same source ccusage uses), cached for 7 days at `~/.cache/gitokens/` —
+  committing never blocks on the network; without pricing data the
+  `AI-Cost-USD` line is simply omitted.
+- The `prepare-commit-msg` hook appends the trailers via
   `git interpret-trailers`, so the data is queryable with plain git:
 
 ```sh

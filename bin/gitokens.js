@@ -302,17 +302,99 @@ function collectCodex(roots, urls, sinceMs, perModel, sessions) {
   }
 }
 
+// ------------------------------------------------------------------- pricing
+
+// Model prices come from LiteLLM's public table (the same source ccusage
+// uses), cached locally so committing never blocks on the network.
+const PRICING_URL =
+  'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json';
+const PRICING_TTL_MS = 7 * 24 * 3600 * 1000;
+
+function pricingCacheFile() {
+  return path.join(os.homedir(), '.cache', 'gitokens', 'pricing.json');
+}
+
+async function loadPricing() {
+  const file = pricingCacheFile();
+  let cached = null;
+  try {
+    cached = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (Date.now() - fs.statSync(file).mtimeMs < PRICING_TTL_MS) return cached;
+  } catch {}
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    const res = await fetch(PRICING_URL, { signal: ctrl.signal });
+    clearTimeout(timer);
+    if (res.ok) {
+      const data = await res.json();
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, JSON.stringify(data));
+      return data;
+    }
+  } catch {}
+  return cached; // stale cache beats nothing
+}
+
+function findPrice(pricing, model) {
+  if (!pricing) return null;
+  if (model === 'codex') return null; // our unknown-model fallback label, not a real model
+  const m = model.toLowerCase();
+  const usable = (p) => p && (p.input_cost_per_token || p.output_cost_per_token);
+  if (usable(pricing[m])) return pricing[m];
+  // exact match under a provider prefix, else longest matching key tail
+  let best = null;
+  let bestLen = 0;
+  for (const key of Object.keys(pricing)) {
+    const kk = key.toLowerCase();
+    if (kk.endsWith('/' + m) && usable(pricing[key])) return pricing[key];
+    const tail = kk.split('/').pop();
+    if ((m.startsWith(tail) || tail.startsWith(m)) && tail.length > bestLen && usable(pricing[key])) {
+      best = pricing[key];
+      bestLen = tail.length;
+    }
+  }
+  return best;
+}
+
+function costOf(price, a) {
+  return (
+    a.in * (price.input_cost_per_token || 0) +
+    a.out * (price.output_cost_per_token || 0) +
+    a.cacheRead * (price.cache_read_input_token_cost || 0) +
+    a.cacheWrite * (price.cache_creation_input_token_cost || 0)
+  );
+}
+
+function fmtCost(usd) {
+  return usd >= 0.995 ? usd.toFixed(2) : usd.toFixed(4);
+}
+
 // ------------------------------------------------------------------ trailers
 
-function trailerLines(stats) {
-  const lines = [];
+function trailerLines(stats, pricing) {
+  if (stats.perModel.size === 0) return [];
   const models = [...stats.perModel.keys()].sort();
+  const total = { in: 0, out: 0, cacheRead: 0, cacheWrite: 0 };
+  let cost = 0;
+  let priced = false;
   for (const model of models) {
     const a = stats.perModel.get(model);
-    lines.push(
-      `AI-Tokens: model=${model} in=${a.in} out=${a.out} cache-read=${a.cacheRead} cache-write=${a.cacheWrite}`
-    );
+    total.in += a.in;
+    total.out += a.out;
+    total.cacheRead += a.cacheRead;
+    total.cacheWrite += a.cacheWrite;
+    const price = findPrice(pricing, model);
+    if (price) {
+      cost += costOf(price, a);
+      priced = true;
+    }
   }
+  const lines = [
+    `AI-Model: ${models.join(', ')}`,
+    `AI-Tokens: in=${total.in}, out=${total.out}, cache-read=${total.cacheRead}, cache-write=${total.cacheWrite}`,
+  ];
+  if (priced) lines.push(`AI-Cost-USD: ${fmtCost(cost)}`);
   return lines;
 }
 
@@ -364,7 +446,7 @@ function fmtNum(n) {
   return n.toLocaleString('en-US');
 }
 
-function main() {
+async function main() {
   const [cmd, arg] = process.argv.slice(2);
   const root = repoRoot();
 
@@ -372,18 +454,30 @@ function main() {
     case 'status': {
       const since = readCheckpoint(root);
       const stats = collect(root, since);
+      const pricing = await loadPricing();
       console.log(`window start : ${since ? new Date(since).toISOString() : '(beginning)'}`);
       console.log(`sessions     : ${stats.sessions}`);
       if (stats.perModel.size === 0) {
         console.log('no AI usage recorded in this window.');
         break;
       }
+      let cost = 0;
+      let priced = false;
       for (const [model, a] of stats.perModel) {
+        const price = findPrice(pricing, model);
+        let costStr = '';
+        if (price) {
+          const c = costOf(price, a);
+          cost += c;
+          priced = true;
+          costStr = ` ($${fmtCost(c)})`;
+        }
         console.log(
           `${model}: in=${fmtNum(a.in)} out=${fmtNum(a.out)} ` +
-            `cache-read=${fmtNum(a.cacheRead)} cache-write=${fmtNum(a.cacheWrite)}`
+            `cache-read=${fmtNum(a.cacheRead)} cache-write=${fmtNum(a.cacheWrite)}${costStr}`
         );
       }
+      if (priced) console.log(`total cost   : $${fmtCost(cost)}`);
       break;
     }
 
@@ -391,7 +485,7 @@ function main() {
       // called by prepare-commit-msg with the message file path
       const since = readCheckpoint(root);
       const stats = collect(root, since);
-      const lines = trailerLines(stats);
+      const lines = trailerLines(stats, await loadPricing());
       if (lines.length === 0) break;
       if (arg) {
         const existing = fs.readFileSync(arg, 'utf8');
@@ -434,4 +528,4 @@ function main() {
   }
 }
 
-main();
+main().catch((e) => die(e.message));
