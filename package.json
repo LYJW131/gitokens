@@ -1,7 +1,12 @@
 {
   "name": "gitokens",
   "version": "0.1.0",
-  "description": "Record AI (Claude Code) token usage between commits and append it to the next commit message as git trailers.",
+  "description": "Record AI token usage (Claude Code, Codex CLI) between commits and append it to the next commit message as git trailers.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LYJW131/gitokens.git"
+  },
+  "keywords": ["git", "hooks", "ai", "token-usage", "claude-code", "codex", "trailers", "vibecoding"],
   "bin": {
     "gitokens": "bin/gitokens.js"
   },

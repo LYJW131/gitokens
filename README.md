@@ -2,6 +2,10 @@
 
 Record AI token usage while you vibe-code, and stamp it onto your next commit.
 
+Every commit answers the question global usage dashboards can't: **what did
+this change cost?** Zero dependencies, no accounts, no daemons — just local
+transcript logs, two git hooks, and standard git trailers.
+
 Between two commits, gitokens aggregates Claude Code and Codex CLI token usage (per model,
 including cache reads/writes) from the local transcript logs, and a
 `prepare-commit-msg` git hook appends the result to your commit message as
@@ -40,11 +44,16 @@ git log --format='%h %(trailers:key=AI-Tokens,valueonly)'
 ## Install
 
 ```sh
-node bin/gitokens.js install   # from inside the target repository
+git clone https://github.com/LYJW131/gitokens.git
+cd gitokens && npm link        # makes the `gitokens` command available globally
+
+cd your-repository
+gitokens install               # one-time per repository
 ```
 
-This installs `prepare-commit-msg` and `post-commit` hooks (it refuses to
-overwrite hooks it doesn't manage) and initializes the checkpoint.
+`install` sets up `prepare-commit-msg` and `post-commit` hooks (it refuses to
+overwrite hooks it doesn't manage) and initializes the checkpoint. From then
+on every ordinary `git commit` gets stamped automatically. Requires Node 18+.
 
 ## Commands
 
