@@ -53,7 +53,23 @@ overwrite hooks it doesn't manage) and initializes the checkpoint.
 | `install`    | install the git hooks in the current repository                 |
 | `status`     | show AI usage since the last commit                             |
 | `trailer`    | print trailers, or append them to a commit-msg file (hook mode) |
+| `config`     | show or change the three trailer-line switches                  |
 | `checkpoint` | reset the usage window to now                                   |
+
+## Trailer configuration
+
+All three trailer lines are enabled by default. They can be switched on or off
+independently for the current repository:
+
+```sh
+gitokens config model off
+gitokens config tokens on
+gitokens config cost off
+```
+
+Run `gitokens config` to see the current settings. The switches are stored in
+the repository's local Git config as `gitokens.trailer.model`,
+`gitokens.trailer.tokens`, and `gitokens.trailer.cost`.
 
 ## Notes & limitations
 

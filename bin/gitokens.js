@@ -14,6 +14,11 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 
 const MARKER = '# gitokens-hook';
+const TRAILER_CONFIG = {
+  model: 'gitokens.trailer.model',
+  tokens: 'gitokens.trailer.tokens',
+  cost: 'gitokens.trailer.cost',
+};
 
 function git(args, opts = {}) {
   return execFileSync('git', args, { encoding: 'utf8', ...opts }).trim();
@@ -372,7 +377,19 @@ function fmtCost(usd) {
 
 // ------------------------------------------------------------------ trailers
 
-function trailerLines(stats, pricing) {
+function trailerOptions(root) {
+  const options = {};
+  for (const [name, key] of Object.entries(TRAILER_CONFIG)) {
+    try {
+      options[name] = git(['config', '--bool', '--get', key], { cwd: root }) !== 'false';
+    } catch {
+      options[name] = true;
+    }
+  }
+  return options;
+}
+
+function trailerLines(stats, pricing, options = { model: true, tokens: true, cost: true }) {
   if (stats.perModel.size === 0) return [];
   const models = [...stats.perModel.keys()].sort();
   const total = { in: 0, out: 0, cacheRead: 0, cacheWrite: 0 };
@@ -390,12 +407,22 @@ function trailerLines(stats, pricing) {
       priced = true;
     }
   }
-  const lines = [
-    `AI-Model: ${models.join(', ')}`,
-    `AI-Tokens: in=${total.in}, out=${total.out}, cache-read=${total.cacheRead}, cache-write=${total.cacheWrite}`,
-  ];
-  if (priced) lines.push(`AI-Cost-USD: ${fmtCost(cost)}`);
+  const lines = [];
+  if (options.model) lines.push(`AI-Model: ${models.join(', ')}`);
+  if (options.tokens) {
+    lines.push(
+      `AI-Tokens: in=${total.in}, out=${total.out}, cache-read=${total.cacheRead}, cache-write=${total.cacheWrite}`
+    );
+  }
+  if (options.cost && priced) lines.push(`AI-Cost-USD: ${fmtCost(cost)}`);
   return lines;
+}
+
+function missingTrailerLines(existing, lines) {
+  return lines.filter((line) => {
+    const key = line.slice(0, line.indexOf(':'));
+    return !existing.split('\n').some((existingLine) => existingLine.startsWith(`${key}:`));
+  });
 }
 
 function appendTrailers(msgFile, lines) {
@@ -447,7 +474,7 @@ function fmtNum(n) {
 }
 
 async function main() {
-  const [cmd, arg] = process.argv.slice(2);
+  const [cmd, ...args] = process.argv.slice(2);
   const root = repoRoot();
 
   switch (cmd) {
@@ -485,14 +512,35 @@ async function main() {
       // called by prepare-commit-msg with the message file path
       const since = readCheckpoint(root);
       const stats = collect(root, since);
-      const lines = trailerLines(stats, await loadPricing());
+      const lines = trailerLines(stats, await loadPricing(), trailerOptions(root));
       if (lines.length === 0) break;
+      const arg = args[0];
       if (arg) {
         const existing = fs.readFileSync(arg, 'utf8');
-        if (!existing.includes('AI-Tokens:')) appendTrailers(arg, lines);
+        const missing = missingTrailerLines(existing, lines);
+        if (missing.length) appendTrailers(arg, missing);
       } else {
         console.log(lines.join('\n'));
       }
+      break;
+    }
+
+    case 'config': {
+      const [name, value] = args;
+      if (!name) {
+        const options = trailerOptions(root);
+        for (const key of Object.keys(TRAILER_CONFIG)) {
+          console.log(`${key.padEnd(6)} : ${options[key] ? 'on' : 'off'}`);
+        }
+        break;
+      }
+      if (!(name in TRAILER_CONFIG) || !['on', 'off'].includes(value)) {
+        die('usage: gitokens config <model|tokens|cost> <on|off>');
+      }
+      git(['config', '--local', TRAILER_CONFIG[name], value === 'on' ? 'true' : 'false'], {
+        cwd: root,
+      });
+      console.log(`${name} : ${value}`);
       break;
     }
 
@@ -523,9 +571,12 @@ async function main() {
   install      install prepare-commit-msg + post-commit hooks in this repo
   status       show AI token usage since the last commit/checkpoint
   trailer      print trailers (or append to a commit-msg file when given a path)
+  config       show trailer switches, or set one with <model|tokens|cost> <on|off>
   checkpoint   reset the usage window to now`);
       process.exit(cmd ? 1 : 0);
   }
 }
 
-main().catch((e) => die(e.message));
+if (require.main === module) main().catch((e) => die(e.message));
+
+module.exports = { missingTrailerLines, trailerLines, trailerOptions };

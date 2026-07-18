@@ -5,6 +5,9 @@
   "bin": {
     "gitokens": "bin/gitokens.js"
   },
+  "scripts": {
+    "test": "node --test"
+  },
   "files": [
     "bin/gitokens.js"
   ],
