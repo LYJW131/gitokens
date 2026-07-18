@@ -32,8 +32,10 @@ function repoRoot() {
   }
 }
 
+// The COMMON git dir is shared by all linked worktrees, so the checkpoint and
+// hooks live in one place no matter which worktree a commit is made from.
 function gitDir(root) {
-  return git(['rev-parse', '--absolute-git-dir'], { cwd: root });
+  return path.resolve(root, git(['rev-parse', '--git-common-dir'], { cwd: root }));
 }
 
 function die(msg) {
