@@ -84,12 +84,51 @@ function encodePath(p) {
   return p.replace(/[^a-zA-Z0-9]/g, '-');
 }
 
-function* jsonlFiles(root, sinceMs) {
-  const enc = encodePath(root);
+// All directory roots whose sessions count toward this repo: the repo itself
+// plus every linked git worktree (Claude worktrees, Codex worktrees, manual ones).
+function acceptedRoots(root) {
+  const roots = [root];
+  try {
+    const out = git(['worktree', 'list', '--porcelain'], { cwd: root });
+    for (const line of out.split('\n')) {
+      if (!line.startsWith('worktree ')) continue;
+      const p = line.slice('worktree '.length);
+      if (!roots.includes(p)) roots.push(p);
+    }
+  } catch {}
+  return roots;
+}
+
+// Normalized remote URLs of this repo, used to attribute Codex sessions whose
+// worktree has since been deleted (session_meta records the repository URL).
+function normalizeRepoUrl(u) {
+  if (!u) return null;
+  return u
+    .replace(/^[a-z+]+:\/\//i, '')
+    .replace(/^git@/, '')
+    .replace(/^([^/]+):/, '$1/')
+    .replace(/\.git$/, '')
+    .toLowerCase();
+}
+
+function repoUrls(root) {
+  const urls = new Set();
+  try {
+    const out = git(['config', '--get-regexp', '^remote\\..*\\.url$'], { cwd: root });
+    for (const line of out.split('\n')) {
+      const u = normalizeRepoUrl(line.split(/\s+/)[1]);
+      if (u) urls.add(u);
+    }
+  } catch {}
+  return urls;
+}
+
+function* jsonlFiles(roots, sinceMs) {
+  const encs = roots.map(encodePath);
   for (const dir of claudeProjectDirs()) {
     const name = path.basename(dir);
-    // include the repo's own project dir and any subdirectory project dirs
-    if (name !== enc && !name.startsWith(enc + '-')) continue;
+    // include each accepted root's own project dir and subdirectory project dirs
+    if (!encs.some((enc) => name === enc || name.startsWith(enc + '-'))) continue;
     let entries;
     try {
       entries = fs.readdirSync(dir);
@@ -111,8 +150,8 @@ function* jsonlFiles(root, sinceMs) {
   }
 }
 
-function inRepo(root, cwd) {
-  return cwd === root || (cwd && cwd.startsWith(root + path.sep));
+function inRepo(roots, cwd) {
+  return !!cwd && roots.some((r) => cwd === r || cwd.startsWith(r + path.sep));
 }
 
 function bump(perModel, model, d) {
@@ -129,8 +168,9 @@ function collect(root, sinceMs) {
   const seen = new Set();
   const sessions = new Set();
   let latest = sinceMs;
+  const roots = acceptedRoots(root);
 
-  for (const file of jsonlFiles(root, sinceMs)) {
+  for (const file of jsonlFiles(roots, sinceMs)) {
     let text;
     try {
       text = fs.readFileSync(file, 'utf8');
@@ -150,7 +190,7 @@ function collect(root, sinceMs) {
       if (!m.model || m.model === '<synthetic>') continue;
       const ts = Date.parse(o.timestamp);
       if (Number.isNaN(ts) || ts <= sinceMs) continue;
-      if (o.cwd && !inRepo(root, o.cwd)) continue;
+      if (o.cwd && !inRepo(roots, o.cwd)) continue;
       const key = (m.id || '') + ':' + (o.requestId || o.uuid || '');
       if (seen.has(key)) continue; // streamed chunks repeat message ids
       seen.add(key);
@@ -167,7 +207,7 @@ function collect(root, sinceMs) {
     }
   }
 
-  collectCodex(root, sinceMs, perModel, sessions);
+  collectCodex(roots, repoUrls(root), sinceMs, perModel, sessions);
   return { perModel, sessions: sessions.size, latest };
 }
 
@@ -203,7 +243,7 @@ function* codexFiles(sinceMs) {
   }
 }
 
-function collectCodex(root, sinceMs, perModel, sessions) {
+function collectCodex(roots, urls, sinceMs, perModel, sessions) {
   for (const file of codexFiles(sinceMs)) {
     let text;
     try {
@@ -212,6 +252,7 @@ function collectCodex(root, sinceMs, perModel, sessions) {
       continue;
     }
     let cwd = null;
+    let urlMatch = false; // session's repo URL matches ours (deleted-worktree fallback)
     let model = 'codex';
     let prev = null; // last seen cumulative total_token_usage
     for (const line of text.split('\n')) {
@@ -225,6 +266,8 @@ function collectCodex(root, sinceMs, perModel, sessions) {
       const p = o.payload;
       if (o.type === 'session_meta') {
         cwd = (p && p.cwd) || cwd;
+        const u = normalizeRepoUrl(p && p.git && p.git.repository_url);
+        if (u && urls.has(u)) urlMatch = true;
       } else if (o.type === 'turn_context') {
         cwd = (p && p.cwd) || cwd;
         model = (p && p.model) || model;
@@ -250,7 +293,7 @@ function collectCodex(root, sinceMs, perModel, sessions) {
         if (d.in < 0 || d.out < 0 || d.cacheRead < 0) continue;
         const ts = Date.parse(o.timestamp);
         if (Number.isNaN(ts) || ts <= sinceMs) continue;
-        if (!inRepo(root, cwd)) continue;
+        if (!inRepo(roots, cwd) && !urlMatch) continue;
         if (d.in + d.out + d.cacheRead === 0) continue;
         bump(perModel, model, d);
         sessions.add(file);

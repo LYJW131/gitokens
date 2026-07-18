@@ -56,8 +56,10 @@ overwrite hooks it doesn't manage) and initializes the checkpoint.
 - Merge, squash and amend commits are skipped.
 - The transcript formats are internal to Claude Code / Codex and may change
   between versions.
-- Sessions running in detached worktrees outside the repository root (e.g.
-  Codex's `~/.codex/worktrees/...`) are not attributed to the repository.
+- Sessions in linked git worktrees (Claude/Codex worktrees, `git worktree add`)
+  are attributed to the main repository. For Codex worktrees that were already
+  deleted, attribution falls back to matching the session's recorded repository
+  URL against this repo's remotes — repos without a remote lose that fallback.
 - Codex does not report cache writes, so `cache-write=0` for GPT models.
 - Set `GITOKENS_SINCE=<ISO date>` to override the window start for ad-hoc
   queries, e.g. `GITOKENS_SINCE=2026-07-01 gitokens status`.
